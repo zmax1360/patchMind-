@@ -7,6 +7,13 @@ from core.nvd_client import get_cve
 from core.logger import get_logger
 
 
+claude = LLM(
+    model="claude-sonnet-4-20250514",
+    api_key=os.environ.get("ANTHROPIC_API_KEY"),
+    temperature=0.2,
+)
+
+
 @dataclass
 class GuardrailResult:
     status: str
@@ -250,8 +257,194 @@ def log_guardrail(result: GuardrailResult, log) -> None:
         log.warning(message)
 
 
+def make_tools(repo, alert, log) -> list:
+    @tool
+    def read_repo_file(file_path: str) -> str:
+        """Read any file from the cloned repository by its relative path (e.g. 'package.json')"""
+        log.info(f"[tool:read] {file_path}")
+        content = repo.read_file(file_path)
+        return content[:6000] if content else f"File not found: {file_path}"
+
+    @tool
+    def list_repo_files(directory: str) -> str:
+        """List source files in a directory excluding node_modules and .git. Pass '.' for root directory."""
+        result = subprocess.run(
+            [
+                "find",
+                directory,
+                "-type",
+                "f",
+                "-not",
+                "-path",
+                "*/node_modules/*",
+                "-not",
+                "-path",
+                "*/.git/*",
+            ],
+            cwd=repo.clone_dir,
+            capture_output=True,
+            text=True,
+        )
+        return "\n".join(result.stdout.strip().split("\n")[:80])
+
+    @tool
+    def nvd_cve_lookup(cve_id: str) -> str:
+        """Look up real CVE details from the National Vulnerability Database. Always call this before drawing any conclusions about a vulnerability."""
+        log.info(f"[tool:nvd] {cve_id}")
+        result = get_cve(cve_id)
+        return json.dumps(result, indent=2) if result else "CVE not found in NVD"
+
+    @tool
+    def apply_package_fix(fix_json: str) -> str:
+        """Apply a dependency version fix to package.json in the cloned repo.
+        Input must be a JSON string with keys:
+          package (str): the npm package name
+          version (str): safe version constraint e.g. '>=3.1.2'
+          add_overrides (bool): true to add npm overrides for transitive deps
+        Example: {"package": "pbkdf2", "version": ">=3.1.2", "add_overrides": true}
+        """
+        log.info(f"[tool:fix] input: {fix_json}")
+        try:
+            fix = json.loads(fix_json)
+        except json.JSONDecodeError as error:
+            return json.dumps({"status": "error", "reason": str(error)})
+
+        package_name = fix.get("package")
+        version = fix.get("version")
+        add_overrides = fix.get("add_overrides", False)
+
+        pkg = repo.get_package_json()
+        if pkg is None:
+            return json.dumps({"status": "error", "reason": "package.json not found"})
+
+        changes = []
+        for section in ["dependencies", "devDependencies"]:
+            if package_name in pkg.get(section, {}):
+                old = pkg[section][package_name]
+                pkg[section][package_name] = version
+                changes.append(f"{section}.{package_name}: {old} -> {version}")
+
+        if add_overrides:
+            pkg.setdefault("overrides", {})[package_name] = version
+            changes.append(f"overrides.{package_name} = {version}")
+
+        repo.write_file("package.json", json.dumps(pkg, indent=2) + "\n")
+        log.info(f"[tool:fix] applied changes: {changes}")
+        return json.dumps({"status": "applied", "changes": changes})
+
+    @tool
+    def run_tests_tool(label: str) -> str:
+        """Run the repository test suite and return real pass/fail with output. Pass label='post-fix' to test after applying fix."""
+        log.info(f"[tool:test] starting: {label}")
+        passed, output = repo.run_tests(label=label)
+        log.info(f"[tool:test] {label}: {'PASS' if passed else 'FAIL'}")
+        return json.dumps(
+            {
+                "passed": passed,
+                "label": label,
+                "output_tail": output[-2000:],
+            }
+        )
+
+    @tool
+    def get_diff_tool(unused: str) -> str:
+        """Get the complete git diff of all changes made to the repository so far. Pass any string as argument e.g. 'show'"""
+        diff = repo.get_diff()
+        return diff if diff else "No changes yet"
+
+    return [
+        read_repo_file,
+        list_repo_files,
+        nvd_cve_lookup,
+        apply_package_fix,
+        run_tests_tool,
+        get_diff_tool,
+    ]
+
+
+def make_agents(tools: list, log) -> list:
+    read_file, list_files, nvd_lookup, apply_fix, run_tests, get_diff = tools
+
+    analyst = Agent(
+        role="Security Vulnerability Analyst",
+        goal="""Produce a complete threat assessment for this specific vulnerability
+        in this specific codebase. Real findings from real files - not generic advice.""",
+        backstory="""You are Priya, a senior AppSec engineer with 12 years experience
+        in financial services at institutions like RBC and Scotiabank. You have reviewed
+        thousands of CVEs and your reports have been used in regulatory audits.
+        Your process is always: (1) look up the CVE in NVD first, (2) read the actual
+        manifest file, (3) list the project structure, (4) map every exposure path.
+        You never draw conclusions without evidence from the actual repository.""",
+        tools=[read_file, list_files, nvd_lookup],
+        llm=claude,
+        verbose=True,
+        allow_delegation=False,
+        max_iter=5,
+    )
+
+    fixer = Agent(
+        role="Secure Remediation Engineer",
+        goal="""Apply the single smallest correct fix that eliminates the vulnerability.
+        Verify it applied correctly. Never modify source files. Never invent versions.""",
+        backstory="""You are Marcus, a staff engineer who has remediated over 2,000
+        dependency vulnerabilities across npm, Maven, and pip ecosystems.
+        Your rules: (1) minimum version bump only,
+        (2) always add npm overrides for transitive paths,
+        (3) always verify by reading the file back after writing,
+        (4) never touch .ts, .js, or any source file - package.json only.
+        You have zero tolerance for invented version numbers.""",
+        tools=[read_file, apply_fix, get_diff],
+        llm=claude,
+        verbose=True,
+        allow_delegation=False,
+        max_iter=5,
+    )
+
+    verifier = Agent(
+        role="Red Team Security Verifier",
+        goal="""Verify the fix is complete and tests still pass. Report honestly.
+        Confidence score is calculated from explicit criteria - not optimism.""",
+        backstory="""You are Dana, a red team engineer who has spent 8 years breaking
+        security fixes at financial institutions. You have caught 47 incomplete patches
+        that would have passed standard review. Your confidence score is calculated:
+        version eliminated (30pts) + overrides present (20pts) +
+        tests passed (30pts) + no source files touched (20pts).
+        If tests fail, you say so clearly. You never assume anything passed.""",
+        tools=[read_file, run_tests, get_diff],
+        llm=claude,
+        verbose=True,
+        allow_delegation=False,
+        max_iter=5,
+    )
+
+    pr_writer = Agent(
+        role="Security PR Documentation Specialist",
+        goal="""Write a complete audit-ready PR body using only real data.
+        No invented CVE scores. No assumed test results. Real data only.""",
+        backstory="""You are James, a compliance engineer who spent 6 years at OSFI
+        before moving to the private sector. You know exactly what regulators look for.
+        Your PRs reference OSFI B-13, PCI-DSS, and FFIEC explicitly.
+        You always call get_diff_tool to get exact changes - never paraphrase diffs.
+        You never write anything you cannot back up with evidence from the pipeline.""",
+        tools=[get_diff],
+        llm=claude,
+        verbose=True,
+        allow_delegation=False,
+        max_iter=3,
+    )
+
+    return [analyst, fixer, verifier, pr_writer]
+
+
 if __name__ == "__main__":
-    alert = {
+    import logging
+
+    # -- Guardrail tests ----------------------------------
+    print("=" * 50)
+    print("GUARDRAIL TESTS")
+    print("=" * 50)
+
+    test_alert = {
         "package_name": "pbkdf2",
         "patched_version": "3.1.2",
         "cve_id": "CVE-2025-6547",
@@ -259,37 +452,68 @@ if __name__ == "__main__":
         "severity": "CRITICAL",
         "manifest_path": "package.json",
     }
-    sample_diff = """diff --git a/package.json b/package.json
---- a/package.json
-+++ b/package.json
-@@ -1,3 +1,3 @@
--    "pbkdf2": "3.1.1"
-+    "pbkdf2": "3.1.2"
-"""
-    sample_package_json = '{"dependencies": {"pbkdf2": "3.1.2"}}'
-    sample_analysis = (
-        "CVE-2025-6547 / GHSA-test affects the pbkdf2 package. "
-        "The vulnerable dependency should be upgraded to the patched version. "
-        "This analysis confirms the package impact, remediation target, "
-        "expected manifest change, and verification plan for dependency-only "
-        "remediation in package.json."
-    )
-    sample_verification = "Verification passed with confidence 92"
-    sample_pr_body = (
-        "This PatchMind remediation updates pbkdf2 to the safe patched version. "
-        "The change is limited to dependency manifests and should be reviewed "
-        "before pushing."
-    )
 
-    print(gate_1_validate_alert(alert))
-    print(gate_2_validate_analysis(sample_analysis, alert))
-    print(gate_3_validate_fix(sample_diff, sample_package_json, alert))
-    print(gate_4_validate_verification(sample_verification))
+    print(gate_1_validate_alert(test_alert))
+    print(
+        gate_2_validate_analysis(
+            "pbkdf2 CVE-2025-6547 analysis complete " * 20, test_alert
+        )
+    )
+    print(
+        gate_3_validate_fix(
+            "diff --git a/package.json", '{"pbkdf2": ">=3.1.2"}', test_alert
+        )
+    )
+    print(gate_4_validate_verification("confidence 92/100 tests passed"))
     print(
         gate_5_validate_before_push(
-            "patchmind/pbkdf2-cve-2025-6547",
-            sample_diff,
-            sample_pr_body,
+            "patchmind/pbkdf2-fix",
+            "diff --git a/package.json b/package.json",
+            "## Title\n" + "x" * 200,
             "PATCHMIND-0198",
         )
     )
+
+    # -- Tools + Agents instantiation test ----------------
+    print()
+    print("=" * 50)
+    print("TOOLS + AGENTS INSTANTIATION TEST")
+    print("=" * 50)
+
+    class MockRepo:
+        clone_dir = None
+        ecosystem = "npm"
+
+        def read_file(self, p):
+            return None
+
+        def get_package_json(self):
+            return {}
+
+        def write_file(self, p, c):
+            pass
+
+        def get_diff(self):
+            return ""
+
+        def run_tests(self, label=""):
+            return (True, "mock output")
+
+    mock_log = logging.getLogger("test")
+    mock_repo = MockRepo()
+    mock_alert = {
+        "package_name": "pbkdf2",
+        "patched_version": "3.1.2",
+        "cve_id": "CVE-2025-6547",
+        "number": 198,
+    }
+
+    tools = make_tools(mock_repo, mock_alert, mock_log)
+    agents = make_agents(tools, mock_log)
+
+    print(f"Tools created: {len(tools)}")
+    print(f"Agents created: {len(agents)}")
+    for a in agents:
+        print(f"  - {a.role}")
+    print()
+    print("5b COMPLETE")
