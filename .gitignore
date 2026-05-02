@@ -34,3 +34,4 @@ yarn-error.log*
 .eslintcachelogs/*.log
 logs/*.jsonl
 logs/*.log
+logs/*.zip
