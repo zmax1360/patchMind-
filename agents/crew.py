@@ -262,6 +262,12 @@ def make_tools(repo, alert, log) -> list:
     def read_repo_file(file_path: str) -> str:
         """Read any file from the cloned repository by its relative path (e.g. 'package.json')"""
         log.info(f"[tool:read] {file_path}")
+        if "package-lock.json" in file_path:
+            return (
+                "package-lock.json cannot be read directly - it is 200k+ tokens.\n"
+                "Use read_repo_file('package.json') instead to verify your changes.\n"
+                "The overrides block you added is in package.json, not package-lock.json."
+            )
         content = repo.read_file(file_path)
         return content[:6000] if content else f"File not found: {file_path}"
 
@@ -293,6 +299,19 @@ def make_tools(repo, alert, log) -> list:
         log.info(f"[tool:nvd] {cve_id}")
         result = get_cve(cve_id)
         return json.dumps(result, indent=2) if result else "CVE not found in NVD"
+
+    @tool
+    def search_package_in_lockfile(package_name: str) -> str:
+        """Search for a specific package in package-lock.json without reading the whole file. Returns version info and immediate dependents for that package only."""
+        log.info(f"[tool:lockfile-search] {package_name}")
+        result = subprocess.run(
+            ["grep", "-A", "5", "-B", "1", f'"{package_name}"', "package-lock.json"],
+            cwd=repo.clone_dir,
+            capture_output=True,
+            text=True,
+        )
+        output = result.stdout.strip()
+        return output[:3000] if output else "Package not found in lockfile"
 
     @tool
     def apply_package_fix(fix_json: str) -> str:
@@ -348,14 +367,42 @@ def make_tools(repo, alert, log) -> list:
 
     @tool
     def get_diff_tool(unused: str) -> str:
-        """Get the complete git diff of all changes made to the repository so far. Pass any string as argument e.g. 'show'"""
+        """Get the git diff of changes made, excluding package-lock.json noise."""
         diff = repo.get_diff()
-        return diff if diff else "No changes yet"
+        if not diff:
+            return "No changes yet"
+
+        # Split diff into per-file sections. Each section starts with "diff --git".
+        sections = []
+        current = []
+        for line in diff.split("\n"):
+            if line.startswith("diff --git") and current:
+                sections.append("\n".join(current))
+                current = []
+            current.append(line)
+        if current:
+            sections.append("\n".join(current))
+
+        # Keep non-lockfile sections in full, but summarize lockfile noise.
+        result = []
+        for section in sections:
+            if "package-lock.json" in section.split("\n")[0]:
+                result.append(
+                    "diff --git a/package-lock.json b/package-lock.json\n"
+                    "[package-lock.json diff omitted - too large. "
+                    "Lockfile will be regenerated on npm install. "
+                    "This is expected behavior after package.json changes.]"
+                )
+            else:
+                result.append(section)
+
+        return "\n\n".join(result)
 
     return [
         read_repo_file,
         list_repo_files,
         nvd_cve_lookup,
+        search_package_in_lockfile,
         apply_package_fix,
         run_tests_tool,
         get_diff_tool,
@@ -363,7 +410,15 @@ def make_tools(repo, alert, log) -> list:
 
 
 def make_agents(tools: list, log) -> list:
-    read_file, list_files, nvd_lookup, apply_fix, run_tests, get_diff = tools
+    (
+        read_file,
+        list_files,
+        nvd_lookup,
+        search_lockfile,
+        apply_fix,
+        run_tests,
+        get_diff,
+    ) = tools
 
     analyst = Agent(
         role="Security Vulnerability Analyst",
@@ -375,7 +430,7 @@ def make_agents(tools: list, log) -> list:
         Your process is always: (1) look up the CVE in NVD first, (2) read the actual
         manifest file, (3) list the project structure, (4) map every exposure path.
         You never draw conclusions without evidence from the actual repository.""",
-        tools=[read_file, list_files, nvd_lookup],
+        tools=[read_file, list_files, nvd_lookup, search_lockfile],
         llm=claude,
         verbose=True,
         allow_delegation=False,
@@ -436,84 +491,303 @@ def make_agents(tools: list, log) -> list:
     return [analyst, fixer, verifier, pr_writer]
 
 
+def make_tasks(agents: list, alert: dict, repo) -> list:
+    analyst, fixer, verifier, pr_writer = agents
+
+    task_analyze = Task(
+        description=f"""
+        You have been assigned a real Dependabot security alert.
+
+        ALERT DATA:
+        Package:          {alert['package_name']}
+        Severity:         {alert['severity']}
+        CVE ID:           {alert['cve_id']}
+        GHSA ID:          {alert['ghsa_id']}
+        Summary:          {alert['summary']}
+        Vulnerable range: {alert['vulnerable_range']}
+        Patched version:  {alert['patched_version']}
+        Manifest file:    {alert['manifest_path']}
+        Ecosystem:        {repo.ecosystem}
+
+        YOUR STEPS - follow in this exact order:
+        1. Call nvd_cve_lookup("{alert['cve_id']}")
+        2. Call read_repo_file("package.json") to see direct dependencies
+        3. Call search_package_in_lockfile("{alert['package_name']}") to find
+           the package in lockfile and identify transitive dependents
+        4. Call list_repo_files(".") to understand the project structure
+        5. Identify ALL exposure paths:
+           - Is it a direct dependency?
+           - Is it in devDependencies?
+           - Which other packages pull it in transitively?
+        6. Write your threat assessment
+
+        OUTPUT FORMAT (use exactly these headers):
+        ## CVE Details
+        ## Affected Versions Found
+        ## Exposure Paths
+        ## Business Impact (financial services context)
+        ## Recommended Fix
+        """,
+        agent=analyst,
+        expected_output="""Structured threat assessment with these sections:
+        CVE Details (id, cvss, severity, description),
+        Affected Versions Found (exact versions from package.json),
+        Exposure Paths (direct and transitive),
+        Business Impact,
+        Recommended Fix (exact version string to use).""",
+    )
+
+    task_fix = Task(
+        description=f"""
+        The analyst has completed their threat assessment.
+        Now apply the fix to the real repository.
+
+        YOUR STEPS - follow in this exact order:
+        1. Call read_repo_file("{alert['manifest_path']}") to see current state
+        2. Call apply_package_fix with this exact JSON string:
+           {{"package": "{alert['package_name']}", "version": ">={alert['patched_version']}", "add_overrides": true}}
+        3. Call read_repo_file("{alert['manifest_path']}") AGAIN to verify the change applied
+        4. Call get_diff_tool("show") to see the exact diff
+        5. Confirm the patched version appears in the file
+
+        RULES:
+        - Use exactly ">={alert['patched_version']}" as the version
+        - Set add_overrides to true always
+        - Do NOT modify any .ts, .js, or source files
+        - Do NOT invent version numbers
+
+        OUTPUT FORMAT:
+        ## Fix Applied
+        ## Before / After
+        ## Git Diff
+        ## Verification
+        """,
+        agent=fixer,
+        expected_output="""Confirmation that fix was applied with:
+        exact before/after versions, git diff output,
+        and verification that patched version appears in package.json.""",
+        context=[task_analyze],
+    )
+
+    task_verify = Task(
+        description="""
+        The fixer has applied the patch. Now verify it independently.
+
+        YOUR STEPS - follow in this exact order:
+        1. Call get_diff_tool("show") FIRST to see what changes were made
+        2. Call read_repo_file("package.json") to confirm the overrides block
+           is present - look specifically for an "overrides" key with pbkdf2
+        3. Call run_tests_tool("post-fix") - run the real test suite
+
+        SCORING RUBRIC - calculate confidence score explicitly:
+        - npm overrides block present in package.json for this package: +30 points
+        - npm overrides block present for transitive coverage: +20 points
+        - Test suite passed: +30 points (0 if failed - be honest)
+        - Only package.json modified: +20 points
+        Total: X/100
+
+        REPORT:
+        - Was the vulnerable version eliminated? (yes/no)
+        - Are transitive paths covered by overrides? (yes/no)
+        - Test result: PASSED or FAILED (from real output)
+        - Confidence score: N/100
+        - Residual risk: LOW / MEDIUM / HIGH + explanation
+
+        OUTPUT FORMAT:
+        ## Verification Checks
+        ## Test Results
+        ## Confidence Score: N/100
+        ## Residual Risk
+        """,
+        agent=verifier,
+        expected_output="""Verification report with explicit scoring,
+        real test results (pass/fail), confidence score N/100,
+        and residual risk assessment.""",
+        context=[task_analyze, task_fix],
+    )
+
+    task_pr = Task(
+        description=f"""
+        Write a complete GitHub Pull Request body for this security fix.
+        This will be reviewed by the security team at a financial institution
+        and may be examined by OSFI regulators.
+
+        YOUR STEPS:
+        1. Call get_diff_tool("show") to get the exact changes
+        2. Use data from the analyst, fixer, and verifier outputs
+        3. Write the complete PR body
+
+        REQUIRED SECTIONS (use exactly these headers):
+        ## {alert['package_name']} - Security Fix [{alert['cve_id']}]
+        ## Summary
+        ## Changes Made
+        (paste exact diff from get_diff_tool - do not paraphrase)
+        ## Security Analysis
+        (CVE ID, CVSS score, CWE classifications, attack vector)
+        ## Verification Results
+        (real test results and confidence score from verifier)
+        ## Testing Instructions
+        (exact commands: npm install, npm audit, npm test)
+        ## Compliance Notes
+        (reference OSFI B-13 Guideline, PCI-DSS Requirement 6.3.3, FFIEC)
+
+        Audit Trail ID: PATCHMIND-{alert['number']:04d}
+        Generated by: PatchMind AI - github.com/zmax1360/patchmind
+        """,
+        agent=pr_writer,
+        expected_output="""Complete GitHub PR body in Markdown with all 7 sections,
+        real diff pasted verbatim, real test results, compliance references,
+        and audit trail ID.""",
+        context=[task_analyze, task_fix, task_verify],
+    )
+
+    return [task_analyze, task_fix, task_verify, task_pr]
+
+
+def run_pipeline(owner: str, repo_name: str, alert: dict) -> dict:
+    audit_id = f"PATCHMIND-{alert['number']:04d}"
+    log = get_logger("patchmind.pipeline", audit_id=audit_id)
+
+    log.info(f"Pipeline starting - {audit_id}")
+    log.info(f"Target: {owner}/{repo_name}")
+    log.info(
+        f"Alert: #{alert['number']} {alert['package_name']} "
+        f"{alert['severity']} {alert['cve_id']}"
+    )
+
+    # Gate 1 - validate alert before touching anything
+    g1 = gate_1_validate_alert(alert)
+    log_guardrail(g1, log)
+    if g1.status == "block":
+        return {"status": "blocked", "gate": "gate_1", "reason": g1.reason}
+
+    repo = RepoManager(owner, repo_name, alert.get("manifest_path", "package.json"))
+
+    try:
+        log.info("Cloning repository...")
+        repo.clone()
+        log.info(f"Cloned to {repo.clone_dir}")
+
+        log.info("Installing dependencies...")
+        install_ok, install_out = repo.install_deps()
+        if not install_ok:
+            log.error(f"Install failed: {install_out[-300:]}")
+            return {"status": "error", "error": "dependency install failed"}
+        log.info("Dependencies installed successfully")
+
+        log.info("Running baseline tests...")
+        baseline_passed, baseline_out = repo.run_tests(label="baseline")
+        log.info(f"Baseline: {'PASS' if baseline_passed else 'FAIL - continuing anyway'}")
+
+        tools = make_tools(repo, alert, log)
+        agents = make_agents(tools, log)
+        tasks = make_tasks(agents, alert, repo)
+
+        crew = Crew(
+            agents=agents,
+            tasks=tasks,
+            process=Process.sequential,
+            verbose=True,
+        )
+
+        log.info("Starting agent pipeline...")
+        result = crew.kickoff()
+        log.info("Agent pipeline complete")
+
+        pr_body = str(result)
+        diff = repo.get_diff()
+
+        # Gate 2 - validate analyst output
+        g2 = gate_2_validate_analysis(pr_body, alert)
+        log_guardrail(g2, log)
+        if g2.status == "block":
+            return {"status": "blocked", "gate": "gate_2", "reason": g2.reason}
+
+        # Gate 3 - validate fix
+        pkg_content = repo.read_file("package.json") or ""
+        g3 = gate_3_validate_fix(diff, pkg_content, alert)
+        g3.audit_id = audit_id
+        log_guardrail(g3, log)
+        if g3.status == "block":
+            return {
+                "status": "blocked",
+                "gate": "gate_3",
+                "reason": g3.reason,
+                "diff": diff,
+            }
+
+        # Gate 4 - validate verification output
+        g4 = gate_4_validate_verification(pr_body)
+        g4.audit_id = audit_id
+        log_guardrail(g4, log)
+
+        # Gate 5 - pre-push validation (always human_required)
+        branch_name = (
+            f"patchmind/{alert['package_name']}-{alert['cve_id'] or alert['ghsa_id']}"
+        )
+        branch_name = branch_name.lower().replace(" ", "-")
+        g5 = gate_5_validate_before_push(branch_name, diff, pr_body, audit_id)
+        g5.audit_id = audit_id
+        log_guardrail(g5, log)
+
+        log.info(f"Pipeline complete - {audit_id}")
+        log.info(f"Diff size: {len(diff)} chars")
+        log.info(f"Gate 4 confidence: {g4.evidence}")
+        log.info(f"Gate 5 status: {g5.status} - human approval required before push")
+
+        return {
+            "status": "completed",
+            "audit_id": audit_id,
+            "pr_body": pr_body,
+            "diff": diff,
+            "branch_name": branch_name,
+            "baseline_passed": baseline_passed,
+            "gate_results": {
+                "g1": g1.status,
+                "g2": g2.status,
+                "g3": g3.status,
+                "g4": g4.status,
+                "g5": g5.status,
+            },
+            "requires_human_approval": True,
+        }
+
+    except Exception as e:
+        log.error(f"Pipeline error: {e}")
+        import traceback
+
+        log.error(traceback.format_exc())
+        return {"status": "error", "error": str(e)}
+
+    finally:
+        repo.cleanup()
+        log.info("Cleanup complete")
+
+
 if __name__ == "__main__":
-    import logging
+    from core.github_client import get_dependabot_alerts
 
-    # -- Guardrail tests ----------------------------------
-    print("=" * 50)
-    print("GUARDRAIL TESTS")
-    print("=" * 50)
+    alerts = get_dependabot_alerts("zmax1360", "angular")
 
-    test_alert = {
-        "package_name": "pbkdf2",
-        "patched_version": "3.1.2",
-        "cve_id": "CVE-2025-6547",
-        "ghsa_id": "GHSA-test",
-        "severity": "CRITICAL",
-        "manifest_path": "package.json",
-    }
+    # Pick first CRITICAL alert
+    critical = next((a for a in alerts if a["severity"] == "CRITICAL"), alerts[0])
 
-    print(gate_1_validate_alert(test_alert))
-    print(
-        gate_2_validate_analysis(
-            "pbkdf2 CVE-2025-6547 analysis complete " * 20, test_alert
-        )
-    )
-    print(
-        gate_3_validate_fix(
-            "diff --git a/package.json", '{"pbkdf2": ">=3.1.2"}', test_alert
-        )
-    )
-    print(gate_4_validate_verification("confidence 92/100 tests passed"))
-    print(
-        gate_5_validate_before_push(
-            "patchmind/pbkdf2-fix",
-            "diff --git a/package.json b/package.json",
-            "## Title\n" + "x" * 200,
-            "PATCHMIND-0198",
-        )
-    )
-
-    # -- Tools + Agents instantiation test ----------------
+    print(f"\nRunning PatchMind pipeline on:")
+    print(f"  Alert #{critical['number']}: {critical['package_name']}")
+    print(f"  Severity: {critical['severity']}")
+    print(f"  CVE: {critical['cve_id']}")
     print()
-    print("=" * 50)
-    print("TOOLS + AGENTS INSTANTIATION TEST")
-    print("=" * 50)
 
-    class MockRepo:
-        clone_dir = None
-        ecosystem = "npm"
+    result = run_pipeline("zmax1360", "angular", critical)
 
-        def read_file(self, p):
-            return None
-
-        def get_package_json(self):
-            return {}
-
-        def write_file(self, p, c):
-            pass
-
-        def get_diff(self):
-            return ""
-
-        def run_tests(self, label=""):
-            return (True, "mock output")
-
-    mock_log = logging.getLogger("test")
-    mock_repo = MockRepo()
-    mock_alert = {
-        "package_name": "pbkdf2",
-        "patched_version": "3.1.2",
-        "cve_id": "CVE-2025-6547",
-        "number": 198,
-    }
-
-    tools = make_tools(mock_repo, mock_alert, mock_log)
-    agents = make_agents(tools, mock_log)
-
-    print(f"Tools created: {len(tools)}")
-    print(f"Agents created: {len(agents)}")
-    for a in agents:
-        print(f"  - {a.role}")
-    print()
-    print("5b COMPLETE")
+    print("\n" + "=" * 60)
+    print(f"Status:   {result['status']}")
+    print(f"Audit ID: {result.get('audit_id')}")
+    print(f"Baseline: {result.get('baseline_passed')}")
+    print(f"Gates:    {result.get('gate_results')}")
+    print(f"Branch:   {result.get('branch_name')}")
+    print(f"\nDIFF (first 1000 chars):")
+    print(result.get('diff', '')[:1000])
+    print(f"\nPR BODY (first 2000 chars):")
+    print(result.get('pr_body', '')[:2000])
+    print(f"\nFull trace in logs/")

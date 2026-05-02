@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def detect_ecosystem(manifest_path: str) -> str:
-    if manifest_path.endswith("package.json"):
+    if manifest_path.endswith(("package.json", "package-lock.json")):
         return "npm"
     if manifest_path.endswith("pom.xml"):
         return "maven"

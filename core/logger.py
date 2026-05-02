@@ -25,11 +25,11 @@ def get_logger(name: str, audit_id: str = None) -> logging.Logger:
     base_name = f"{audit_id}_{timestamp}"
 
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
-
-    # Avoid adding duplicate handlers if called multiple times
     if logger.handlers:
         return logger
+
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
 
     # 1. Terminal handler - colored by level
     class ColorFormatter(logging.Formatter):
