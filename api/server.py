@@ -40,6 +40,7 @@ class JobStatus(BaseModel):
     diff: Optional[str] = None
     branch_name: Optional[str] = None
     error: Optional[str] = None
+    token_usage: Optional[dict] = None
 
 
 @app.get("/health")
@@ -112,6 +113,7 @@ def get_job(job_id: str) -> JobStatus:
         diff=job.get("diff"),
         branch_name=job.get("branch_name"),
         error=job.get("error"),
+        token_usage=job.get("token_usage"),
     )
 
 
@@ -275,6 +277,7 @@ async def run_pipeline_job(job_id: str):
         job["repo_mgr"] = result.get("repo_mgr")
         job["requires_human_approval"] = result.get("requires_human_approval", True)
         job["baseline_passed"] = result.get("baseline_passed")
+        job["token_usage"] = result.get("token_usage", {})
 
         if result["status"] == "completed":
             add_log("success", f"Pipeline complete - audit ID: {result.get('audit_id')}")

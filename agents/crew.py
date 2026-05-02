@@ -7,6 +7,35 @@ from core.nvd_client import get_cve
 from core.logger import get_logger
 
 
+class TokenTracker:
+    # Claude claude-sonnet-4-20250514 pricing (per million tokens)
+    INPUT_COST_PER_M = 3.00
+    OUTPUT_COST_PER_M = 15.00
+
+    def __init__(self):
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    def add(self, input_tokens: int, output_tokens: int):
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+
+    @property
+    def total_cost_usd(self) -> float:
+        input_cost = (self.input_tokens / 1_000_000) * self.INPUT_COST_PER_M
+        output_cost = (self.output_tokens / 1_000_000) * self.OUTPUT_COST_PER_M
+        return round(input_cost + output_cost, 4)
+
+    def summary(self) -> dict:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.input_tokens + self.output_tokens,
+            "cost_usd": self.total_cost_usd,
+            "cost_display": f"${self.total_cost_usd:.4f}",
+        }
+
+
 claude = LLM(
     model="claude-sonnet-4-20250514",
     api_key=os.environ.get("ANTHROPIC_API_KEY"),
@@ -734,6 +763,7 @@ def run_pipeline(owner: str, repo_name: str, alert: dict, log_callback=None) -> 
 
     repo = RepoManager(owner, repo_name, alert.get("manifest_path", "package.json"))
 
+    token_tracker = None
     try:
         emit("info", f"Cloning {owner}/{repo_name}...")
         log.info("Cloning repository...")
@@ -761,21 +791,37 @@ def run_pipeline(owner: str, repo_name: str, alert: dict, log_callback=None) -> 
         agents = make_agents(tools, log)
         tasks = make_tasks(agents, alert, repo, emit)
 
+        token_tracker = TokenTracker()
         step_cb = make_step_callback(emit)
         task_prog_cb = make_task_progress_callback(emit)
+
+        def combined_step_callback(step):
+            try:
+                if hasattr(step, "usage") and step.usage:
+                    usage = step.usage
+                    if isinstance(usage, dict):
+                        token_tracker.add(
+                            int(usage.get("input_tokens", 0) or 0),
+                            int(usage.get("output_tokens", 0) or 0),
+                        )
+            except Exception:
+                pass
+            if log_callback:
+                step_cb(step)
 
         crew = Crew(
             agents=agents,
             tasks=tasks,
             process=Process.sequential,
             verbose=True,
-            step_callback=step_cb if log_callback else None,
+            step_callback=combined_step_callback,
             task_callback=task_prog_cb if log_callback else None,
         )
 
         emit("agent", "Agent 1 (Priya - Analyst) starting...")
         log.info("Starting agent pipeline...")
         result = crew.kickoff()
+        token_usage = token_tracker.summary()
         emit("info", "All agent tasks finished; running guardrails...")
         log.info("Agent pipeline complete")
 
@@ -786,7 +832,12 @@ def run_pipeline(owner: str, repo_name: str, alert: dict, log_callback=None) -> 
         g2 = gate_2_validate_analysis(pr_body, alert)
         log_guardrail(g2, log)
         if g2.status == "block":
-            return {"status": "blocked", "gate": "gate_2", "reason": g2.reason}
+            return {
+                "status": "blocked",
+                "gate": "gate_2",
+                "reason": g2.reason,
+                "token_usage": token_usage,
+            }
 
         # Gate 3 - validate fix
         pkg_content = repo.read_file("package.json") or ""
@@ -799,6 +850,7 @@ def run_pipeline(owner: str, repo_name: str, alert: dict, log_callback=None) -> 
                 "gate": "gate_3",
                 "reason": g3.reason,
                 "diff": diff,
+                "token_usage": token_usage,
             }
 
         # Gate 4 - validate verification output
@@ -838,6 +890,7 @@ def run_pipeline(owner: str, repo_name: str, alert: dict, log_callback=None) -> 
             },
             "requires_human_approval": True,
             "repo_mgr": repo,
+            "token_usage": token_usage,
         }
 
     except Exception as e:
@@ -846,7 +899,10 @@ def run_pipeline(owner: str, repo_name: str, alert: dict, log_callback=None) -> 
 
         log.error(traceback.format_exc())
         emit("error", f"Pipeline error: {str(e)}")
-        return {"status": "error", "error": str(e)}
+        err: dict = {"status": "error", "error": str(e)}
+        if token_tracker is not None:
+            err["token_usage"] = token_tracker.summary()
+        return err
 
 
 if __name__ == "__main__":

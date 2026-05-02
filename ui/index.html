@@ -812,6 +812,12 @@
     function renderComplete(job) {
       const gates = job.gate_results || {};
       const score = extractConfidence(job);
+      const usage = job.token_usage || {};
+      const costDisplay = usage.cost_display || "calculating...";
+      const totalTokens =
+        typeof usage.total_tokens === "number"
+          ? usage.total_tokens.toLocaleString()
+          : "—";
       const isApproved = job.status === "approved";
       const prUrl = job.pr_url || "";
       const prNum = job.pr_number != null ? job.pr_number : "";
@@ -857,6 +863,16 @@
               <h2>Confidence Score</h2>
               <div class="confidence" style="color: ${confidenceColor(score)}">${score === null ? "N/A" : `${score}`}</div>
               <div class="stat-label">OUT OF 100</div>
+            </div>
+            <div class="panel section">
+              <h2>Pipeline Cost</h2>
+              <div class="confidence" style="font-size:36px;color:var(--accent)">
+                ${escapeHtml(costDisplay)}
+              </div>
+              <div class="stat-label">USD THIS RUN</div>
+              <div style="margin-top:12px;color:var(--muted);font:11px var(--mono)">
+                ${escapeHtml(totalTokens)} TOTAL TOKENS
+              </div>
             </div>
             <div class="panel section">
               <h2>PR Body Preview</h2>
