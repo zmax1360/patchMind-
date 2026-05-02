@@ -33,3 +33,4 @@ yarn-error.log*
 # React
 .eslintcachelogs/*.log
 logs/*.jsonl
+logs/*.log
