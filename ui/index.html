@@ -714,11 +714,32 @@
     }
 
     function updateAgentsFromLog(entry) {
-      const message = String(entry.message || "").toLowerCase();
-      if (message.includes("cloning")) agentStates = ["running", "waiting", "waiting", "waiting"];
-      if (message.includes("agent pipeline")) agentStates = ["running", "running", "running", "running"];
-      if (message.includes("agent pipeline complete")) agentStates = ["complete", "complete", "complete", "complete"];
-      if (entry.type === "done") agentStates = ["complete", "complete", "complete", "complete"];
+      const msg = (entry.message || "").toLowerCase();
+
+      if (msg.includes("cloning") || msg.includes("installing")) {
+        // pre-pipeline, all waiting
+      }
+      if (msg.includes("agent 1") || msg.includes("analyst")) {
+        agentStates[0] = "running";
+      }
+      if (msg.includes("agent 2") || msg.includes("fixer")) {
+        agentStates[0] = "complete";
+        agentStates[1] = "running";
+      }
+      if (msg.includes("agent 3") || msg.includes("verifier")) {
+        agentStates[1] = "complete";
+        agentStates[2] = "running";
+      }
+      if (msg.includes("agent 4") || msg.includes("pr writer")) {
+        agentStates[2] = "complete";
+        agentStates[3] = "running";
+      }
+      if (msg.includes("all agent tasks finished")) {
+        agentStates[3] = "complete";
+      }
+      if (msg.includes("pipeline complete") || entry.type === "done") {
+        agentStates = ["complete", "complete", "complete", "complete"];
+      }
       renderAgents();
     }
 
@@ -791,15 +812,28 @@
     function renderComplete(job) {
       const gates = job.gate_results || {};
       const score = extractConfidence(job);
+      const isApproved = job.status === "approved";
+      const prUrl = job.pr_url || "";
+      const prNum = job.pr_number != null ? job.pr_number : "";
+      const subtitleInner = isApproved && prUrl
+        ? (() => {
+            const safeUrl = String(prUrl).replace(/"/g, "");
+            return `Audit ${escapeHtml(job.audit_id || "pending")} | <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">↗ View PR #${escapeHtml(String(prNum))} on GitHub</a>`;
+          })()
+        : `Audit ${escapeHtml(job.audit_id || "pending")} | Branch ${escapeHtml(job.branch_name || "pending")}`;
       mainView.innerHTML = `
         <div class="panel">
           <div class="pipeline-header">
             <div>
               <div class="eyebrow">PIPELINE COMPLETE</div>
               <h1 class="pipeline-title">${escapeHtml(selectedAlert?.package_name || "Remediation")}</h1>
-              <div class="pipeline-subtitle">Audit ${escapeHtml(job.audit_id || "pending")} | Branch ${escapeHtml(job.branch_name || "pending")}</div>
+              <div class="pipeline-subtitle" id="pipelineSubtitle">${subtitleInner}</div>
             </div>
-            <button class="approve" id="approveBtn" ${job.status === "completed" ? "" : "disabled"}>APPROVE & PUSH</button>
+            <button class="approve" id="approveBtn"
+              ${job.status === "completed" && !isApproved ? "" : "disabled"}
+              style="${isApproved ? "background:rgba(0,255,136,0.15);color:var(--accent);border:1px solid var(--accent)" : ""}">
+              ${isApproved ? "✓ PR CREATED" : "APPROVE & PUSH"}
+            </button>
           </div>
           <div class="section">
             <h2>Gate Results</h2>
@@ -850,17 +884,84 @@
       }
       const data = await response.json();
       modal.classList.remove("open");
-      showToast(`Approved. Branch: ${data.branch_name}`);
+
+      const pr_url = data.pr_url || data.pull_request?.html_url || "";
+      const pr_number = data.pr_number ?? data.pull_request?.number ?? "";
+
+      currentJob = {
+        ...currentJob,
+        status: "approved",
+        pr_url,
+        pr_number,
+      };
+      renderComplete(currentJob);
+
+      if (selectedAlert) {
+        const alertCards = document.querySelectorAll(".alert-card");
+        alertCards.forEach((card) => {
+          const btn = card.querySelector(".remediate");
+          const onClick = btn && btn.getAttribute("onclick");
+          if (!btn || !onClick || !onClick.includes(String(selectedAlert.number))) return;
+
+          const top = card.querySelector(".alert-top");
+          if (top && !card.querySelector(".remediated-badge")) {
+            const badge = document.createElement("span");
+            badge.className = "remediated-badge";
+            badge.textContent = "REMEDIATED";
+            badge.style.cssText =
+              "font:700 9px var(--mono);letter-spacing:0.08em;padding:4px 8px;background:rgba(0,255,136,0.2);color:var(--accent);border:1px solid var(--accent);margin-left:8px";
+            top.appendChild(badge);
+          }
+
+          btn.textContent = "PR CREATED";
+          btn.style.background = "rgba(0,255,136,0.15)";
+          btn.style.color = "var(--accent)";
+          btn.style.border = "1px solid var(--accent)";
+          btn.disabled = true;
+
+          if (pr_url && !card.querySelector("a.pr-created-link")) {
+            const link = document.createElement("a");
+            link.className = "pr-created-link";
+            link.href = pr_url;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.style.cssText =
+              "display:block;margin-top:8px;color:var(--accent);font:11px var(--mono);text-decoration:none";
+            link.textContent = `↗ PR #${pr_number}`;
+            card.appendChild(link);
+          }
+        });
+      }
+
+      showToastPrCreated(pr_number, pr_url);
+
       if (navigator.clipboard && data.pr_body) {
         await navigator.clipboard.writeText(data.pr_body);
-        showToast(`Approved. PR body copied. Branch: ${data.branch_name}`);
       }
     }
 
     function showToast(message) {
-      toast.textContent = message;
+      toast.innerHTML = "";
+      toast.appendChild(document.createTextNode(message));
       toast.classList.add("show");
       setTimeout(() => toast.classList.remove("show"), 5200);
+    }
+
+    function showToastPrCreated(pr_number, pr_url) {
+      toast.innerHTML = "";
+      const ok = document.createTextNode(`✓ PR #${pr_number} created — `);
+      toast.appendChild(ok);
+      if (pr_url) {
+        const a = document.createElement("a");
+        a.href = pr_url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.style.color = "var(--accent)";
+        a.textContent = pr_url;
+        toast.appendChild(a);
+      }
+      toast.classList.add("show");
+      setTimeout(() => toast.classList.remove("show"), 6200);
     }
 
     refreshBtn.addEventListener("click", fetchAlerts);

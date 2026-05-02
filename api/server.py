@@ -204,6 +204,8 @@ def approve_job(job_id: str) -> dict:
             "branch_name": branch_name,
             "base_branch": default_branch,
             "pr_body": pr_body,
+            "pr_url": pr.get("html_url"),
+            "pr_number": pr.get("number"),
             "pull_request": pr,
             "message": "Branch pushed and pull request created.",
         }
@@ -228,6 +230,18 @@ async def run_pipeline_job(job_id: str):
             }
         )
 
+    def make_callback(job):
+        def callback(type, message):
+            job["logs"].append(
+                {
+                    "type": type,
+                    "message": message,
+                    "ts": datetime.now().isoformat(),
+                }
+            )
+
+        return callback
+
     try:
         add_log("info", f"Pipeline starting - {job['owner']}/{job['repo']}")
         add_log(
@@ -239,13 +253,16 @@ async def run_pipeline_job(job_id: str):
         # Import here to avoid circular imports
         from agents.crew import run_pipeline
 
-        add_log("info", "Cloning repository and installing dependencies...")
-
         # Run pipeline in thread pool because it is synchronous.
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None,
-            lambda: run_pipeline(job["owner"], job["repo"], job["alert"]),
+            lambda: run_pipeline(
+                job["owner"],
+                job["repo"],
+                job["alert"],
+                log_callback=make_callback(job),
+            ),
         )
 
         job["status"] = result["status"]

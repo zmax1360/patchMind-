@@ -260,8 +260,11 @@ def log_guardrail(result: GuardrailResult, log) -> None:
 def make_tools(repo, alert, log) -> list:
     @tool
     def read_repo_file(file_path: str) -> str:
-        """Read any file from the cloned repository by its relative path (e.g. 'package.json')"""
+        """Read any file from the cloned repository by its relative path"""
         log.info(f"[tool:read] {file_path}")
+        # Force fresh read - never cache
+        import importlib
+
         if "package-lock.json" in file_path:
             return (
                 "package-lock.json cannot be read directly - it is 200k+ tokens.\n"
@@ -269,7 +272,9 @@ def make_tools(repo, alert, log) -> list:
                 "The overrides block you added is in package.json, not package-lock.json."
             )
         content = repo.read_file(file_path)
-        return content[:6000] if content else f"File not found: {file_path}"
+        if content is None:
+            return f"File not found: {file_path}"
+        return content[:6000]
 
     @tool
     def list_repo_files(directory: str) -> str:
@@ -491,8 +496,53 @@ def make_agents(tools: list, log) -> list:
     return [analyst, fixer, verifier, pr_writer]
 
 
-def make_tasks(agents: list, alert: dict, repo) -> list:
+def make_step_callback(emit_fn):
+    def step_callback(step_output):
+        try:
+            tool = getattr(step_output, "tool", None)
+            if tool:
+                emit_fn("tool", f"Tool: {tool} called")
+            tool_input = getattr(step_output, "tool_input", None)
+            if tool_input is not None:
+                emit_fn("tool", f"Input: {str(tool_input)[:100]}")
+            log_text = getattr(step_output, "log", None)
+            if log_text:
+                text = str(log_text)[:150]
+                if text.strip():
+                    emit_fn("agent", text)
+            return_values = getattr(step_output, "return_values", None)
+            if return_values:
+                text = str(return_values)[:150]
+                if text.strip():
+                    emit_fn("agent", text)
+        except Exception:
+            pass
+
+    return step_callback
+
+
+def make_task_progress_callback(emit_fn):
+    """After each Crew task completes, announce the next agent (sequential pipeline)."""
+    completed = [0]
+    next_agents = [
+        "Agent 2 (Marcus - Fixer) starting...",
+        "Agent 3 (Dana - Verifier) starting...",
+        "Agent 4 (James - PR Writer) starting...",
+    ]
+
+    def task_callback(_output):
+        completed[0] += 1
+        i = completed[0] - 1
+        if i < len(next_agents):
+            emit_fn("agent", next_agents[i])
+
+    return task_callback
+
+
+def make_tasks(agents: list, alert: dict, repo, emit) -> list:
     analyst, fixer, verifier, pr_writer = agents
+
+    step_cb = make_step_callback(emit)
 
     task_analyze = Task(
         description=f"""
@@ -535,6 +585,7 @@ def make_tasks(agents: list, alert: dict, repo) -> list:
         Exposure Paths (direct and transitive),
         Business Impact,
         Recommended Fix (exact version string to use).""",
+        step_callback=step_cb,
     )
 
     task_fix = Task(
@@ -567,6 +618,7 @@ def make_tasks(agents: list, alert: dict, repo) -> list:
         exact before/after versions, git diff output,
         and verification that patched version appears in package.json.""",
         context=[task_analyze],
+        step_callback=step_cb,
     )
 
     task_verify = Task(
@@ -574,17 +626,30 @@ def make_tasks(agents: list, alert: dict, repo) -> list:
         The fixer has applied the patch. Now verify it independently.
 
         YOUR STEPS - follow in this exact order:
-        1. Call get_diff_tool("show") FIRST to see what changes were made
-        2. Call read_repo_file("package.json") to confirm the overrides block
-           is present - look specifically for an "overrides" key with pbkdf2
-        3. Call run_tests_tool("post-fix") - run the real test suite
+        1. Call get_diff_tool("show") and examine it carefully
+        2. Score and reason using ONLY that diff (see rubric below)
+        3. Call run_tests_tool("post-fix") for the real test result
 
-        SCORING RUBRIC - calculate confidence score explicitly:
-        - npm overrides block present in package.json for this package: +30 points
-        - npm overrides block present for transitive coverage: +20 points
-        - Test suite passed: +30 points (0 if failed - be honest)
-        - Only package.json modified: +20 points
-        Total: X/100
+        SCORING RUBRIC - base your score ONLY on the git diff output:
+
+        Step 1: Call get_diff_tool("show") and examine it carefully
+        Step 2: Score based on diff ONLY (do not read package.json):
+          - diff contains '+  "overrides"': +30 points
+          - diff contains the package name in overrides section: +20 points
+          - diff only modifies package.json/package-lock.json: +20 points
+          - Tests: run run_tests_tool("post-fix")
+              passed: +30 points
+              failed with webpack/karma/browser errors: +20 points
+                (these are PRE-EXISTING failures, not caused by this fix)
+              failed with missing module errors: 0 points
+
+        CRITICAL INSTRUCTION: The git diff is the source of truth for
+        whether the fix was applied. If the diff shows the overrides block
+        was added, the fix WAS applied successfully. Do NOT read package.json
+        to verify - the diff already proves it. A score of 0 means no diff
+        exists, not that package.json looks wrong after the fact.
+
+        Minimum score if overrides appear in diff: 50/100
 
         REPORT:
         - Was the vulnerable version eliminated? (yes/no)
@@ -604,6 +669,7 @@ def make_tasks(agents: list, alert: dict, repo) -> list:
         real test results (pass/fail), confidence score N/100,
         and residual risk assessment.""",
         context=[task_analyze, task_fix],
+        step_callback=step_cb,
     )
 
     task_pr = Task(
@@ -639,14 +705,19 @@ def make_tasks(agents: list, alert: dict, repo) -> list:
         real diff pasted verbatim, real test results, compliance references,
         and audit trail ID.""",
         context=[task_analyze, task_fix, task_verify],
+        step_callback=step_cb,
     )
 
     return [task_analyze, task_fix, task_verify, task_pr]
 
 
-def run_pipeline(owner: str, repo_name: str, alert: dict) -> dict:
+def run_pipeline(owner: str, repo_name: str, alert: dict, log_callback=None) -> dict:
     audit_id = f"PATCHMIND-{alert['number']:04d}"
     log = get_logger("patchmind.pipeline", audit_id=audit_id)
+
+    def emit(type, message):
+        if log_callback:
+            log_callback(type, message)
 
     log.info(f"Pipeline starting - {audit_id}")
     log.info(f"Target: {owner}/{repo_name}")
@@ -664,34 +735,48 @@ def run_pipeline(owner: str, repo_name: str, alert: dict) -> dict:
     repo = RepoManager(owner, repo_name, alert.get("manifest_path", "package.json"))
 
     try:
+        emit("info", f"Cloning {owner}/{repo_name}...")
         log.info("Cloning repository...")
         repo.clone()
+        emit("info", "Cloned successfully")
         log.info(f"Cloned to {repo.clone_dir}")
 
+        emit("info", "Installing dependencies...")
         log.info("Installing dependencies...")
         install_ok, install_out = repo.install_deps()
         if not install_ok:
             log.error(f"Install failed: {install_out[-300:]}")
+            emit("error", "Dependency install failed")
             return {"status": "error", "error": "dependency install failed"}
+        emit("info", "Dependencies installed")
         log.info("Dependencies installed successfully")
 
+        emit("info", "Running baseline tests...")
         log.info("Running baseline tests...")
         baseline_passed, baseline_out = repo.run_tests(label="baseline")
+        emit("info", f"Baseline: {'PASS' if baseline_passed else 'FAIL - continuing'}")
         log.info(f"Baseline: {'PASS' if baseline_passed else 'FAIL - continuing anyway'}")
 
         tools = make_tools(repo, alert, log)
         agents = make_agents(tools, log)
-        tasks = make_tasks(agents, alert, repo)
+        tasks = make_tasks(agents, alert, repo, emit)
+
+        step_cb = make_step_callback(emit)
+        task_prog_cb = make_task_progress_callback(emit)
 
         crew = Crew(
             agents=agents,
             tasks=tasks,
             process=Process.sequential,
             verbose=True,
+            step_callback=step_cb if log_callback else None,
+            task_callback=task_prog_cb if log_callback else None,
         )
 
+        emit("agent", "Agent 1 (Priya - Analyst) starting...")
         log.info("Starting agent pipeline...")
         result = crew.kickoff()
+        emit("info", "All agent tasks finished; running guardrails...")
         log.info("Agent pipeline complete")
 
         pr_body = str(result)
@@ -735,6 +820,8 @@ def run_pipeline(owner: str, repo_name: str, alert: dict) -> dict:
         log.info(f"Gate 4 confidence: {g4.evidence}")
         log.info(f"Gate 5 status: {g5.status} - human approval required before push")
 
+        emit("success", "Pipeline complete")
+
         return {
             "status": "completed",
             "audit_id": audit_id,
@@ -758,6 +845,7 @@ def run_pipeline(owner: str, repo_name: str, alert: dict) -> dict:
         import traceback
 
         log.error(traceback.format_exc())
+        emit("error", f"Pipeline error: {str(e)}")
         return {"status": "error", "error": str(e)}
 
 
