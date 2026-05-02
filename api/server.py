@@ -23,6 +23,12 @@ app.add_middleware(
 jobs: dict = {}
 
 
+def _patchmind_branch_for_alert(alert: dict) -> str:
+    """Same branch naming as agents.crew.run_pipeline (gate_5 / job branch_name)."""
+    raw = f"patchmind/{alert['package_name']}-{alert.get('cve_id') or alert.get('ghsa_id') or ''}"
+    return raw.lower().replace(" ", "-")
+
+
 class RemediateRequest(BaseModel):
     owner: str = "zmax1360"
     repo: str = "angular"
@@ -49,11 +55,18 @@ def health() -> dict:
 
 
 @app.get("/alerts/{owner}/{repo}")
-def get_alerts(owner: str, repo: str) -> list:
+async def get_alerts(owner: str, repo: str) -> list:
     try:
-        from core.github_client import get_dependabot_alerts
+        from core.github_client import get_dependabot_alerts, get_existing_pr
 
-        return get_dependabot_alerts(owner, repo)
+        alerts = get_dependabot_alerts(owner, repo)
+
+        for alert in alerts:
+            branch = _patchmind_branch_for_alert(alert)
+            existing = get_existing_pr(owner, repo, branch)
+            alert["existing_pr"] = existing if existing else None
+
+        return alerts
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -151,14 +164,38 @@ def approve_job(job_id: str) -> dict:
         if job["status"] not in ["completed", "approved"]:
             raise HTTPException(status_code=400, detail="Job not ready for approval")
 
+        owner = job["owner"]
+        repo = job["repo"]
+        branch_name = job.get("branch_name")
+
+        from core.github_client import get_existing_pr
+
+        if branch_name:
+            existing_pr = get_existing_pr(owner, repo, branch_name)
+            if existing_pr:
+                repo_mgr = job.get("repo_mgr")
+                if repo_mgr:
+                    repo_mgr.cleanup()
+                    job["repo_mgr"] = None
+                job["status"] = "approved"
+                job["pr_url"] = existing_pr["html_url"]
+                job["pr_number"] = existing_pr["number"]
+                return {
+                    "approved": True,
+                    "already_exists": True,
+                    "branch_name": branch_name,
+                    "pr_url": existing_pr["html_url"],
+                    "pr_number": existing_pr["number"],
+                    "pr_title": existing_pr["title"],
+                    "message": f"PR #{existing_pr['number']} already exists for this branch",
+                }
+
         gate_results = job.get("gate_results") or {}
         if gate_results.get("g5") != "human_required":
             raise HTTPException(status_code=400, detail="No approval needed")
 
         from core.github_client import create_pull_request, get_default_branch
 
-        owner = job["owner"]
-        repo = job["repo"]
         alert = job["alert"]
         audit_id = job.get("audit_id") or f"PATCHMIND-{alert['number']:04d}"
         package_name = alert["package_name"]

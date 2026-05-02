@@ -601,7 +601,26 @@
 
     function renderAlerts() {
       alertCount.textContent = `${alerts.length} OPEN`;
-      alertsList.innerHTML = alerts.map((alert) => `
+      alertsList.innerHTML = alerts.map((alert) => {
+        const prUrl = alert.existing_pr
+          ? String(alert.existing_pr.html_url).replace(/"/g, "")
+          : "";
+        const actionBlock = alert.existing_pr
+          ? `
+          <div style="margin-top:8px">
+            <a href="${prUrl}"
+               target="_blank" rel="noopener noreferrer"
+               style="display:block;padding:10px;background:rgba(0,255,136,0.08);
+                      border:1px solid rgba(0,255,136,0.3);color:var(--accent);
+                      font:700 11px var(--mono);text-decoration:none;text-align:center">
+              ✓ PR #${escapeHtml(String(alert.existing_pr.number))} EXISTS — VIEW ON GITHUB
+            </a>
+          </div>
+        `
+          : `
+          <button class="remediate" onclick="startRemediation(${Number(alert.number)})">REMEDIATE</button>
+        `;
+        return `
         <article class="alert-card">
           <div class="alert-top">
             <span class="severity ${severityClass(alert.severity)}">${escapeHtml(alert.severity || "UNKNOWN")}</span>
@@ -610,9 +629,10 @@
           <div class="pkg">${escapeHtml(alert.package_name)}</div>
           <div class="identifier">${escapeHtml(alert.cve_id || alert.ghsa_id || "NO-ID")}</div>
           <div class="summary">${escapeHtml(truncate(alert.summary, 60))}</div>
-          <button class="remediate" onclick="startRemediation(${Number(alert.number)})">REMEDIATE</button>
+          ${actionBlock}
         </article>
-      `).join("");
+      `;
+      }).join("");
     }
 
     function getStats() {

@@ -104,6 +104,26 @@ def get_default_branch(owner: str, repo: str) -> str:
     return response.json().get("default_branch") or "main"
 
 
+def get_existing_pr(owner: str, repo: str, branch_name: str) -> dict | None:
+    """Check if a PR already exists for a given branch."""
+    url = f"{GITHUB_API_BASE_URL}/repos/{owner}/{repo}/pulls"
+    params = {"state": "all", "head": f"{owner}:{branch_name}", "per_page": 5}
+    resp = requests.get(url, headers=_headers(), params=params)
+    if resp.status_code != 200:
+        return None
+    prs = resp.json()
+    if prs:
+        pr0 = prs[0]
+        return {
+            "number": pr0["number"],
+            "html_url": pr0["html_url"],
+            "state": pr0["state"],
+            "title": pr0["title"],
+            "created_at": pr0["created_at"],
+        }
+    return None
+
+
 def create_pull_request(
     owner: str, repo: str, title: str, body: str, head: str, base: str
 ) -> dict:
