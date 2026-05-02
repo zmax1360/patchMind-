@@ -750,6 +750,7 @@ def run_pipeline(owner: str, repo_name: str, alert: dict) -> dict:
                 "g5": g5.status,
             },
             "requires_human_approval": True,
+            "repo_mgr": repo,
         }
 
     except Exception as e:
@@ -758,10 +759,6 @@ def run_pipeline(owner: str, repo_name: str, alert: dict) -> dict:
 
         log.error(traceback.format_exc())
         return {"status": "error", "error": str(e)}
-
-    finally:
-        repo.cleanup()
-        log.info("Cleanup complete")
 
 
 if __name__ == "__main__":

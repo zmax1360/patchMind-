@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from typing import Optional
 import uuid
 from datetime import datetime
+import traceback
 
 
 app = FastAPI(title="PatchMind API", version="1.0.0")
@@ -140,27 +141,78 @@ def stream_job(job_id: str) -> StreamingResponse:
 
 @app.get("/job/{job_id}/approve")
 def approve_job(job_id: str) -> dict:
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        if job_id not in jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
 
-    job = jobs[job_id]
-    if job["status"] != "completed":
-        raise HTTPException(status_code=400, detail="Job not ready for approval")
+        job = jobs[job_id]
+        if job["status"] not in ["completed", "approved"]:
+            raise HTTPException(status_code=400, detail="Job not ready for approval")
 
-    gate_results = job.get("gate_results") or {}
-    if gate_results.get("g5") != "human_required":
-        raise HTTPException(status_code=400, detail="No approval needed")
+        gate_results = job.get("gate_results") or {}
+        if gate_results.get("g5") != "human_required":
+            raise HTTPException(status_code=400, detail="No approval needed")
 
-    from core.repo_manager import RepoManager
-    from core.github_client import create_pull_request
+        from core.github_client import create_pull_request, get_default_branch
 
-    job["status"] = "approved"
-    return {
-        "approved": True,
-        "branch_name": job["branch_name"],
-        "pr_body": job["pr_body"],
-        "message": "PR body ready. Push branch manually or connect GitHub App.",
-    }
+        owner = job["owner"]
+        repo = job["repo"]
+        alert = job["alert"]
+        audit_id = job.get("audit_id") or f"PATCHMIND-{alert['number']:04d}"
+        package_name = alert["package_name"]
+        safe_version = alert["patched_version"]
+        branch_name = job["branch_name"]
+        pr_body = job["pr_body"]
+
+        repo_mgr = job.get("repo_mgr")
+        if repo_mgr is None or repo_mgr.clone_dir is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Repo no longer available - re-run pipeline",
+            )
+
+        default_branch = get_default_branch(owner, repo)
+        commit_message = (
+            f"fix(security): upgrade {package_name} to {safe_version}\n\n"
+            f"{audit_id}\n"
+            f"Addresses {alert.get('cve_id') or alert.get('ghsa_id', '')}"
+        )
+
+        branch_ok = repo_mgr.create_branch_and_commit(branch_name, commit_message)
+        if not branch_ok:
+            raise HTTPException(status_code=500, detail="Failed to create branch or commit")
+
+        push_ok, push_err = repo_mgr.push_branch(branch_name)
+        if not push_ok:
+            raise HTTPException(status_code=500, detail=f"Failed to push branch: {push_err}")
+
+        pr = create_pull_request(
+            owner,
+            repo,
+            f"fix(security): upgrade {package_name} to {safe_version}",
+            pr_body,
+            branch_name,
+            default_branch,
+        )
+
+        repo_mgr.cleanup()
+        job["repo_mgr"] = None
+
+        job["status"] = "approved"
+        return {
+            "approved": True,
+            "branch_name": branch_name,
+            "base_branch": default_branch,
+            "pr_body": pr_body,
+            "pull_request": pr,
+            "message": "Branch pushed and pull request created.",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        print(f"APPROVE ERROR: {error_detail}")
+        raise HTTPException(500, f"Approval failed: {str(e)}")
 
 
 async def run_pipeline_job(job_id: str):
@@ -203,6 +255,7 @@ async def run_pipeline_job(job_id: str):
         job["pr_body"] = result.get("pr_body")
         job["diff"] = result.get("diff", "")[:50000]
         job["branch_name"] = result.get("branch_name")
+        job["repo_mgr"] = result.get("repo_mgr")
         job["requires_human_approval"] = result.get("requires_human_approval", True)
         job["baseline_passed"] = result.get("baseline_passed")
 
@@ -222,6 +275,19 @@ async def run_pipeline_job(job_id: str):
         job["error"] = str(e)
         job["completed_at"] = datetime.now().isoformat()
         add_log("error", f"Pipeline error: {str(e)}")
+
+
+@app.get("/job/{job_id}/reject")
+async def reject_job(job_id: str):
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+    job = jobs[job_id]
+    repo_mgr = job.get("repo_mgr")
+    if repo_mgr:
+        repo_mgr.cleanup()
+        job["repo_mgr"] = None
+    job["status"] = "rejected"
+    return {"rejected": True, "job_id": job_id}
 
 
 if __name__ == "__main__":

@@ -1,0 +1,873 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PatchMind Security Operations</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0a0c10;
+      --panel: #10141c;
+      --panel-2: #141a24;
+      --line: #263040;
+      --muted: #8390a7;
+      --text: #edf3ff;
+      --accent: #00ff88;
+      --danger: #ff3366;
+      --warning: #ff6b35;
+      --medium: #f5a623;
+      --blue: #0066ff;
+      --purple: #aa88ff;
+      --cyan: #5a7aaa;
+      --mono: "Space Mono", ui-monospace, monospace;
+      --sans: "DM Sans", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: var(--sans);
+      background:
+        linear-gradient(rgba(0, 255, 136, 0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 255, 136, 0.025) 1px, transparent 1px),
+        radial-gradient(circle at 20% 0%, rgba(0, 255, 136, 0.08), transparent 32%),
+        var(--bg);
+      background-size: 28px 28px, 28px 28px, auto, auto;
+      overflow: hidden;
+    }
+
+    button {
+      border: 0;
+      cursor: pointer;
+      font-family: var(--mono);
+      transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    button:disabled { cursor: not-allowed; opacity: 0.45; transform: none; }
+
+    .app {
+      display: grid;
+      grid-template-columns: 400px 1fr;
+      height: 100vh;
+    }
+
+    .left {
+      border-right: 1px solid var(--line);
+      background: rgba(16, 20, 28, 0.92);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .brand {
+      padding: 24px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 18px;
+    }
+
+    .logo {
+      font-family: var(--mono);
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+    }
+
+    .logo span { color: var(--accent); }
+
+    .live {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--accent);
+      font: 700 11px var(--mono);
+      letter-spacing: 0.14em;
+    }
+
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 16px var(--accent);
+      animation: pulse 1.4s infinite;
+    }
+
+    .repo-box {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      background: #0c1017;
+    }
+
+    .repo-name {
+      font: 700 13px var(--mono);
+      color: var(--text);
+    }
+
+    .refresh {
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid rgba(0, 255, 136, 0.35);
+      padding: 8px 10px;
+      font-size: 11px;
+    }
+
+    .alert-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font: 700 12px var(--mono);
+      letter-spacing: 0.08em;
+    }
+
+    .count-badge {
+      padding: 6px 10px;
+      background: rgba(0, 255, 136, 0.1);
+      color: var(--accent);
+      border: 1px solid rgba(0, 255, 136, 0.3);
+    }
+
+    .alerts {
+      overflow: auto;
+      padding: 14px;
+      min-height: 0;
+    }
+
+    .alert-card {
+      padding: 14px;
+      margin-bottom: 12px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+    }
+
+    .alert-card:hover {
+      border-color: rgba(0, 255, 136, 0.45);
+      background: #17202c;
+    }
+
+    .alert-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .severity {
+      display: inline-block;
+      padding: 4px 8px;
+      font: 700 10px var(--mono);
+      letter-spacing: 0.08em;
+    }
+
+    .sev-critical { background: var(--danger); color: white; }
+    .sev-high { background: var(--warning); color: white; }
+    .sev-medium { background: var(--medium); color: black; }
+    .sev-low { background: #4a4a6a; color: white; }
+    .sev-unknown { background: #343b4d; color: white; }
+
+    .pkg {
+      font: 700 15px var(--mono);
+      color: white;
+      overflow-wrap: anywhere;
+    }
+
+    .identifier {
+      color: var(--muted);
+      font: 12px var(--mono);
+      margin: 8px 0;
+    }
+
+    .summary {
+      color: #b6c0d4;
+      font-size: 13px;
+      line-height: 1.45;
+      min-height: 38px;
+    }
+
+    .remediate {
+      width: 100%;
+      margin-top: 12px;
+      padding: 10px 12px;
+      color: #031108;
+      background: var(--accent);
+      font-weight: 700;
+    }
+
+    .right {
+      min-width: 0;
+      overflow: auto;
+      padding: 28px;
+    }
+
+    .empty {
+      height: 100%;
+      min-height: 680px;
+      display: grid;
+      place-content: center;
+      text-align: center;
+    }
+
+    .empty h1 {
+      margin: 0 0 12px;
+      font: 700 30px var(--mono);
+    }
+
+    .empty p {
+      color: var(--muted);
+      margin-bottom: 28px;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 150px);
+      gap: 14px;
+      justify-content: center;
+    }
+
+    .stat {
+      background: rgba(16, 20, 28, 0.85);
+      border: 1px solid var(--line);
+      padding: 18px;
+    }
+
+    .stat-value {
+      font: 700 30px var(--mono);
+      color: var(--accent);
+    }
+
+    .stat-label {
+      color: var(--muted);
+      font: 700 11px var(--mono);
+      letter-spacing: 0.08em;
+    }
+
+    .panel {
+      background: rgba(16, 20, 28, 0.78);
+      border: 1px solid var(--line);
+      margin-bottom: 18px;
+      box-shadow: 0 18px 80px rgba(0, 0, 0, 0.25);
+    }
+
+    .pipeline-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 20px;
+      padding: 22px;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      font: 700 11px var(--mono);
+      letter-spacing: 0.14em;
+      margin-bottom: 8px;
+    }
+
+    .pipeline-title {
+      margin: 0;
+      font: 700 26px var(--mono);
+    }
+
+    .pipeline-subtitle {
+      color: var(--muted);
+      font: 13px var(--mono);
+      margin-top: 8px;
+    }
+
+    .agents {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 14px;
+      padding: 0 22px 22px;
+    }
+
+    .agent-card {
+      position: relative;
+      padding: 16px;
+      min-height: 104px;
+      background: #0c1017;
+      border: 1px solid var(--line);
+    }
+
+    .agent-card.running {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(0, 255, 136, 0.25), 0 0 28px rgba(0, 255, 136, 0.12);
+      animation: borderPulse 1.5s infinite;
+    }
+
+    .agent-card.complete {
+      border-color: rgba(0, 255, 136, 0.75);
+    }
+
+    .agent-name {
+      font: 700 14px var(--mono);
+      margin-bottom: 18px;
+    }
+
+    .agent-status {
+      color: var(--muted);
+      font: 11px var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+
+    .agent-card.complete .agent-status { color: var(--accent); }
+
+    .terminal {
+      height: 360px;
+      padding: 16px;
+      overflow: auto;
+      background: #05070a;
+      border-top: 1px solid var(--line);
+      font: 12px/1.55 var(--mono);
+    }
+
+    .log-line { white-space: pre-wrap; margin-bottom: 5px; }
+    .log-info { color: var(--cyan); }
+    .log-agent { color: var(--accent); }
+    .log-tool { color: var(--purple); }
+    .log-error { color: var(--danger); }
+    .log-success { color: var(--accent); font-weight: 700; }
+    .log-gate { color: var(--medium); }
+
+    .complete-grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 18px;
+    }
+
+    .section {
+      padding: 20px;
+    }
+
+    .section h2 {
+      margin: 0 0 14px;
+      font: 700 15px var(--mono);
+      letter-spacing: 0.04em;
+    }
+
+    .gates {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(90px, 1fr));
+      gap: 10px;
+    }
+
+    .gate {
+      padding: 12px;
+      background: #0c1017;
+      border: 1px solid var(--line);
+      font-family: var(--mono);
+    }
+
+    .gate-name {
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 8px;
+    }
+
+    .gate-status {
+      font-size: 12px;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .status-pass { color: var(--accent); }
+    .status-warn { color: var(--medium); }
+    .status-human_required { color: var(--blue); }
+    .status-block { color: var(--danger); }
+
+    .confidence {
+      font: 700 58px var(--mono);
+      color: var(--accent);
+      line-height: 1;
+    }
+
+    .diff, .pr-body {
+      max-height: 430px;
+      overflow: auto;
+      padding: 16px;
+      background: #05070a;
+      border: 1px solid var(--line);
+      font: 12px/1.5 var(--mono);
+      white-space: pre-wrap;
+    }
+
+    .diff-line.added { background: rgba(0, 255, 136, 0.12); color: #8dffc5; }
+    .diff-line.removed { background: rgba(255, 51, 102, 0.13); color: #ff9ab3; }
+    .diff-line.meta { color: var(--purple); }
+
+    .pr-body {
+      font-family: var(--sans);
+      color: #d8e0ef;
+    }
+
+    .pr-body h2 {
+      color: var(--accent);
+      font-family: var(--mono);
+      margin: 18px 0 8px;
+    }
+
+    .approve {
+      padding: 12px 16px;
+      background: var(--accent);
+      color: #031108;
+      font-weight: 700;
+    }
+
+    .modal {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.72);
+      z-index: 50;
+    }
+
+    .modal.open { display: flex; }
+
+    .modal-card {
+      width: min(520px, calc(100vw - 32px));
+      padding: 24px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: 0 24px 100px rgba(0, 0, 0, 0.5);
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 22px;
+    }
+
+    .ghost {
+      padding: 11px 14px;
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--text);
+    }
+
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      max-width: 420px;
+      display: none;
+      padding: 14px 16px;
+      background: #07100c;
+      border: 1px solid rgba(0, 255, 136, 0.4);
+      color: var(--accent);
+      font: 12px var(--mono);
+      z-index: 60;
+    }
+
+    .toast.show { display: block; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.45; transform: scale(0.9); }
+      50% { opacity: 1; transform: scale(1.15); }
+    }
+
+    @keyframes borderPulse {
+      0%, 100% { box-shadow: 0 0 0 1px rgba(0, 255, 136, 0.1), 0 0 12px rgba(0, 255, 136, 0.08); }
+      50% { box-shadow: 0 0 0 1px rgba(0, 255, 136, 0.45), 0 0 34px rgba(0, 255, 136, 0.18); }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <aside class="left">
+      <div class="brand">
+        <div class="brand-row">
+          <div class="logo">Patch<span>Mind</span></div>
+          <div class="live"><span class="pulse-dot"></span>LIVE</div>
+        </div>
+        <div class="repo-box">
+          <div>
+            <div class="stat-label">REPOSITORY</div>
+            <div class="repo-name">zmax1360/angular</div>
+          </div>
+          <button class="refresh" id="refreshBtn">REFRESH</button>
+        </div>
+      </div>
+      <div class="alert-meta">
+        <span>DEPENDABOT ALERTS</span>
+        <span class="count-badge" id="alertCount">0 OPEN</span>
+      </div>
+      <div class="alerts" id="alertsList"></div>
+    </aside>
+
+    <section class="right" id="mainView"></section>
+  </main>
+
+  <div class="modal" id="confirmModal">
+    <div class="modal-card">
+      <div class="eyebrow">HUMAN APPROVAL REQUIRED</div>
+      <h2 id="modalTitle">Approve push?</h2>
+      <p id="modalText"></p>
+      <div class="modal-actions">
+        <button class="ghost" id="cancelApprove">CANCEL</button>
+        <button class="approve" id="confirmApprove">CONFIRM</button>
+      </div>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const API_BASE = "http://localhost:8000";
+    const OWNER = "zmax1360";
+    const REPO = "angular";
+    const severityRank = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+    const agentNames = ["Analyst", "Fixer", "Verifier", "PR Writer"];
+
+    let alerts = [];
+    let selectedAlert = null;
+    let currentJobId = null;
+    let currentJob = null;
+    let source = null;
+    let agentStates = ["waiting", "waiting", "waiting", "waiting"];
+
+    const alertsList = document.getElementById("alertsList");
+    const alertCount = document.getElementById("alertCount");
+    const mainView = document.getElementById("mainView");
+    const refreshBtn = document.getElementById("refreshBtn");
+    const modal = document.getElementById("confirmModal");
+    const modalText = document.getElementById("modalText");
+    const cancelApprove = document.getElementById("cancelApprove");
+    const confirmApprove = document.getElementById("confirmApprove");
+    const toast = document.getElementById("toast");
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function severityClass(severity) {
+      const key = String(severity || "unknown").toLowerCase();
+      return `sev-${key}`;
+    }
+
+    function truncate(value, length = 60) {
+      const text = String(value || "");
+      return text.length > length ? `${text.slice(0, length - 3)}...` : text;
+    }
+
+    function sortAlerts(items) {
+      return [...items].sort((a, b) => {
+        const aRank = severityRank[a.severity] ?? 99;
+        const bRank = severityRank[b.severity] ?? 99;
+        return aRank - bRank || a.number - b.number;
+      });
+    }
+
+    async function fetchAlerts() {
+      alertsList.innerHTML = "<div class='identifier'>Loading alerts...</div>";
+      try {
+        const response = await fetch(`${API_BASE}/alerts/${OWNER}/${REPO}`);
+        if (!response.ok) throw new Error(await response.text());
+        alerts = sortAlerts(await response.json());
+        renderAlerts();
+        renderEmpty();
+      } catch (error) {
+        alertsList.innerHTML = `<div class="log-error">Failed to load alerts: ${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function renderAlerts() {
+      alertCount.textContent = `${alerts.length} OPEN`;
+      alertsList.innerHTML = alerts.map((alert) => `
+        <article class="alert-card">
+          <div class="alert-top">
+            <span class="severity ${severityClass(alert.severity)}">${escapeHtml(alert.severity || "UNKNOWN")}</span>
+            <span class="identifier">#${escapeHtml(alert.number)}</span>
+          </div>
+          <div class="pkg">${escapeHtml(alert.package_name)}</div>
+          <div class="identifier">${escapeHtml(alert.cve_id || alert.ghsa_id || "NO-ID")}</div>
+          <div class="summary">${escapeHtml(truncate(alert.summary, 60))}</div>
+          <button class="remediate" onclick="startRemediation(${Number(alert.number)})">REMEDIATE</button>
+        </article>
+      `).join("");
+    }
+
+    function getStats() {
+      return {
+        total: alerts.length,
+        critical: alerts.filter((a) => a.severity === "CRITICAL").length,
+        high: alerts.filter((a) => a.severity === "HIGH").length,
+      };
+    }
+
+    function renderEmpty() {
+      const stats = getStats();
+      mainView.innerHTML = `
+        <div class="empty">
+          <div>
+            <div class="eyebrow">SECURITY REMEDIATION CONSOLE</div>
+            <h1>Select an alert to begin remediation</h1>
+            <p>PatchMind will clone, analyze, patch, verify, and prepare an audit-ready PR.</p>
+            <div class="stats">
+              <div class="stat"><div class="stat-value">${stats.total}</div><div class="stat-label">TOTAL</div></div>
+              <div class="stat"><div class="stat-value" style="color: var(--danger)">${stats.critical}</div><div class="stat-label">CRITICAL</div></div>
+              <div class="stat"><div class="stat-value" style="color: var(--warning)">${stats.high}</div><div class="stat-label">HIGH</div></div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function startRemediation(alertNumber) {
+      selectedAlert = alerts.find((alert) => alert.number === alertNumber);
+      if (!selectedAlert) return;
+
+      if (source) source.close();
+      agentStates = ["running", "waiting", "waiting", "waiting"];
+      renderRunning();
+      appendLog({ type: "info", message: "Submitting remediation job..." });
+
+      try {
+        const response = await fetch(`${API_BASE}/remediate/${OWNER}/${REPO}/${alertNumber}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ owner: OWNER, repo: REPO }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const data = await response.json();
+        currentJobId = data.job_id;
+        appendLog({ type: "success", message: `Job queued: ${currentJobId}` });
+        openStream(currentJobId);
+      } catch (error) {
+        appendLog({ type: "error", message: `Failed to start: ${error.message}` });
+      }
+    }
+
+    function renderRunning() {
+      mainView.innerHTML = `
+        <div class="panel">
+          <div class="pipeline-header">
+            <div>
+              <div class="eyebrow">PIPELINE RUNNING</div>
+              <h1 class="pipeline-title">${escapeHtml(selectedAlert.package_name)}</h1>
+              <div class="pipeline-subtitle">
+                ${escapeHtml(selectedAlert.severity)} | ${escapeHtml(selectedAlert.cve_id || selectedAlert.ghsa_id || "NO-ID")} | Alert #${escapeHtml(selectedAlert.number)}
+              </div>
+            </div>
+            <span class="severity ${severityClass(selectedAlert.severity)}">${escapeHtml(selectedAlert.severity)}</span>
+          </div>
+          <div class="agents" id="agentsRow"></div>
+          <div class="terminal" id="logStream"></div>
+        </div>
+      `;
+      renderAgents();
+    }
+
+    function renderAgents() {
+      const row = document.getElementById("agentsRow");
+      if (!row) return;
+      row.innerHTML = agentNames.map((name, index) => {
+        const state = agentStates[index];
+        const label = state === "complete" ? "complete - check" : state;
+        return `
+          <div class="agent-card ${state}">
+            <div class="agent-name">${escapeHtml(name)}</div>
+            <div class="agent-status">${escapeHtml(label)}</div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function appendLog(entry) {
+      const stream = document.getElementById("logStream");
+      if (!stream) return;
+      const line = document.createElement("div");
+      const type = entry.type || "info";
+      line.className = `log-line log-${type}`;
+      line.textContent = `[${new Date(entry.ts || Date.now()).toLocaleTimeString()}] ${type.toUpperCase()} ${entry.message || ""}`;
+      stream.appendChild(line);
+      stream.scrollTop = stream.scrollHeight;
+      updateAgentsFromLog(entry);
+    }
+
+    function updateAgentsFromLog(entry) {
+      const message = String(entry.message || "").toLowerCase();
+      if (message.includes("cloning")) agentStates = ["running", "waiting", "waiting", "waiting"];
+      if (message.includes("agent pipeline")) agentStates = ["running", "running", "running", "running"];
+      if (message.includes("agent pipeline complete")) agentStates = ["complete", "complete", "complete", "complete"];
+      if (entry.type === "done") agentStates = ["complete", "complete", "complete", "complete"];
+      renderAgents();
+    }
+
+    function openStream(jobId) {
+      source = new EventSource(`${API_BASE}/job/${jobId}/stream`);
+      source.onmessage = async (event) => {
+        const entry = JSON.parse(event.data);
+        appendLog(entry);
+        if (entry.type === "done") {
+          source.close();
+          await fetchFinalJob(jobId);
+        }
+      };
+      source.onerror = () => {
+        appendLog({ type: "error", message: "SSE connection interrupted" });
+        source.close();
+      };
+    }
+
+    async function fetchFinalJob(jobId) {
+      const response = await fetch(`${API_BASE}/job/${jobId}`);
+      currentJob = await response.json();
+      renderComplete(currentJob);
+    }
+
+    function extractConfidence(job) {
+      const body = job.pr_body || "";
+      const match = body.match(/(\d+)\s*\/\s*100/) || body.match(/confidence.*?(\d+)/i);
+      return match ? Number(match[1]) : null;
+    }
+
+    function confidenceColor(score) {
+      if (score === null) return "var(--muted)";
+      if (score >= 85) return "var(--accent)";
+      if (score >= 70) return "var(--medium)";
+      return "var(--danger)";
+    }
+
+    function packageJsonDiffOnly(diff) {
+      const sections = [];
+      let current = [];
+      for (const line of String(diff || "").split("\n")) {
+        if (line.startsWith("diff --git") && current.length) {
+          sections.push(current.join("\n"));
+          current = [];
+        }
+        current.push(line);
+      }
+      if (current.length) sections.push(current.join("\n"));
+      return sections
+        .filter((section) => section.split("\n")[0].includes("package.json"))
+        .join("\n\n") || "No package.json diff available.";
+    }
+
+    function renderDiff(diff) {
+      return packageJsonDiffOnly(diff).split("\n").map((line) => {
+        const cls = line.startsWith("+") && !line.startsWith("+++") ? "added" :
+          line.startsWith("-") && !line.startsWith("---") ? "removed" :
+          line.startsWith("diff ") || line.startsWith("@@") ? "meta" : "";
+        return `<div class="diff-line ${cls}">${escapeHtml(line)}</div>`;
+      }).join("");
+    }
+
+    function renderMarkdown(text) {
+      return escapeHtml(text || "")
+        .replace(/^## (.*)$/gm, "<h2>$1</h2>")
+        .replace(/\n/g, "<br />");
+    }
+
+    function renderComplete(job) {
+      const gates = job.gate_results || {};
+      const score = extractConfidence(job);
+      mainView.innerHTML = `
+        <div class="panel">
+          <div class="pipeline-header">
+            <div>
+              <div class="eyebrow">PIPELINE COMPLETE</div>
+              <h1 class="pipeline-title">${escapeHtml(selectedAlert?.package_name || "Remediation")}</h1>
+              <div class="pipeline-subtitle">Audit ${escapeHtml(job.audit_id || "pending")} | Branch ${escapeHtml(job.branch_name || "pending")}</div>
+            </div>
+            <button class="approve" id="approveBtn" ${job.status === "completed" ? "" : "disabled"}>APPROVE & PUSH</button>
+          </div>
+          <div class="section">
+            <h2>Gate Results</h2>
+            <div class="gates">
+              ${["g1", "g2", "g3", "g4", "g5"].map((gate) => `
+                <div class="gate">
+                  <div class="gate-name">${gate.toUpperCase()}</div>
+                  <div class="gate-status status-${escapeHtml(gates[gate] || "warn")}">${escapeHtml(gates[gate] || "unknown")}</div>
+                </div>
+              `).join("")}
+            </div>
+          </div>
+        </div>
+        <div class="complete-grid">
+          <div class="panel section">
+            <h2>Git Diff - package.json</h2>
+            <div class="diff">${renderDiff(job.diff || "")}</div>
+          </div>
+          <div>
+            <div class="panel section">
+              <h2>Confidence Score</h2>
+              <div class="confidence" style="color: ${confidenceColor(score)}">${score === null ? "N/A" : `${score}`}</div>
+              <div class="stat-label">OUT OF 100</div>
+            </div>
+            <div class="panel section">
+              <h2>PR Body Preview</h2>
+              <div class="pr-body">${renderMarkdown(job.pr_body || "No PR body returned.")}</div>
+            </div>
+          </div>
+        </div>
+      `;
+      document.getElementById("approveBtn")?.addEventListener("click", showApproveModal);
+    }
+
+    function showApproveModal() {
+      if (!currentJob) return;
+      modalText.textContent = `This will push branch ${currentJob.branch_name} to GitHub. Confirm?`;
+      modal.classList.add("open");
+    }
+
+    async function approveJob() {
+      if (!currentJobId) return;
+      const response = await fetch(`${API_BASE}/job/${currentJobId}/approve`);
+      if (!response.ok) {
+        showToast(`Approval failed: ${await response.text()}`);
+        modal.classList.remove("open");
+        return;
+      }
+      const data = await response.json();
+      modal.classList.remove("open");
+      showToast(`Approved. Branch: ${data.branch_name}`);
+      if (navigator.clipboard && data.pr_body) {
+        await navigator.clipboard.writeText(data.pr_body);
+        showToast(`Approved. PR body copied. Branch: ${data.branch_name}`);
+      }
+    }
+
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add("show");
+      setTimeout(() => toast.classList.remove("show"), 5200);
+    }
+
+    refreshBtn.addEventListener("click", fetchAlerts);
+    cancelApprove.addEventListener("click", () => modal.classList.remove("open"));
+    confirmApprove.addEventListener("click", approveJob);
+
+    fetchAlerts();
+  </script>
+</body>
+</html>
