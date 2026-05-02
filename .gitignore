@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Environment variables (never commit these)
+.env
+.env.local
+.env.*.local
+
+# Build output
+build/
+
+# Wardrobe images (stored locally, not in git)
+public/wardrobe-images/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Cursor
+.cursor/
+
+# macOS
+.DS_Store
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# React
+.eslintcache
