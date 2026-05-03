@@ -505,11 +505,16 @@
           <div class="live"><span class="pulse-dot"></span>LIVE</div>
         </div>
         <div class="repo-box">
-          <div>
+          <div style="flex:1">
             <div class="stat-label">REPOSITORY</div>
-            <div class="repo-name">zmax1360/angular</div>
+            <input id="repoInput"
+              value=""
+              style="background:transparent;border:none;color:var(--text);
+                     font:700 13px var(--mono);width:100%;outline:none"
+              placeholder="owner/repo"
+            />
           </div>
-          <button class="refresh" id="refreshBtn">REFRESH</button>
+          <button class="refresh" id="refreshBtn">LOAD</button>
         </div>
       </div>
       <div class="alert-meta">
@@ -537,8 +542,8 @@
 
   <script>
     const API_BASE = "http://localhost:8000";
-    const OWNER = "zmax1360";
-    const REPO = "angular";
+    let OWNER = localStorage.getItem("pm_owner") || "zmax1360";
+    let REPO = localStorage.getItem("pm_repo") || "angular";
     const severityRank = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
     const agentNames = ["Analyst", "Fixer", "Verifier", "PR Writer"];
 
@@ -553,6 +558,8 @@
     const alertCount = document.getElementById("alertCount");
     const mainView = document.getElementById("mainView");
     const refreshBtn = document.getElementById("refreshBtn");
+    const repoInput = document.getElementById("repoInput");
+    repoInput.value = `${OWNER}/${REPO}`;
     const modal = document.getElementById("confirmModal");
     const modalText = document.getElementById("modalText");
     const cancelApprove = document.getElementById("cancelApprove");
@@ -1000,7 +1007,19 @@
       setTimeout(() => toast.classList.remove("show"), 6200);
     }
 
-    refreshBtn.addEventListener("click", fetchAlerts);
+    refreshBtn.addEventListener("click", () => {
+      const val = document.getElementById("repoInput").value.trim();
+      const parts = val.split("/");
+      if (parts.length === 2 && parts[0] && parts[1]) {
+        OWNER = parts[0];
+        REPO = parts[1];
+        localStorage.setItem("pm_owner", OWNER);
+        localStorage.setItem("pm_repo", REPO);
+        fetchAlerts();
+      } else {
+        showToast("Format: owner/repo");
+      }
+    });
     cancelApprove.addEventListener("click", () => modal.classList.remove("open"));
     confirmApprove.addEventListener("click", approveJob);
 

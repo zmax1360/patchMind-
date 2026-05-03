@@ -207,7 +207,9 @@ class RepoManager:
 
 
 if __name__ == "__main__":
-    manager = RepoManager("zmax1360", "angular", "package.json")
+    owner = os.environ.get("GITHUB_OWNER", "zmax1360")
+    repo = os.environ.get("GITHUB_REPO", "angular")
+    manager = RepoManager(owner, repo, "package.json")
     print(f"Detected ecosystem: {manager.ecosystem}")
     try:
         clone_dir = manager.clone()

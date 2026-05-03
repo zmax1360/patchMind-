@@ -142,7 +142,9 @@ def create_pull_request(
 
 
 if __name__ == "__main__":
-    alerts = get_dependabot_alerts("zmax1360", "angular")
+    owner = os.environ.get("GITHUB_OWNER", "zmax1360")
+    repo = os.environ.get("GITHUB_REPO", "angular")
+    alerts = get_dependabot_alerts(owner, repo)
     print(f"Found {len(alerts)} alerts")
     for alert in alerts:
         print(
