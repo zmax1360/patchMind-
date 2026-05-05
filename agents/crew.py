@@ -429,7 +429,7 @@ def make_agents(tools: list, log) -> list:
         role="Security Vulnerability Analyst",
         goal="""Produce a complete threat assessment for this specific vulnerability
         in this specific codebase. Real findings from real files - not generic advice.""",
-        backstory="""You are Priya, a senior AppSec engineer with 12 years experience
+        backstory="""You are Paulo, a senior AppSec engineer with 12 years experience
         in financial services at institutions like RBC and Scotiabank. You have reviewed
         thousands of CVEs and your reports have been used in regulatory audits.
         Your process is always: (1) look up the CVE in NVD first, (2) read the actual
@@ -446,7 +446,7 @@ def make_agents(tools: list, log) -> list:
         role="Secure Remediation Engineer",
         goal="""Apply the single smallest correct fix that eliminates the vulnerability.
         Verify it applied correctly. Never modify source files. Never invent versions.""",
-        backstory="""You are Marcus, a staff engineer who has remediated over 2,000
+        backstory="""You are Avtar, a staff engineer who has remediated over 2,000
         dependency vulnerabilities across npm, Maven, and pip ecosystems.
         Your rules: (1) minimum version bump only,
         (2) always add npm overrides for transitive paths,
@@ -464,7 +464,7 @@ def make_agents(tools: list, log) -> list:
         role="Red Team Security Verifier",
         goal="""Verify the fix is complete and tests still pass. Report honestly.
         Confidence score is calculated from explicit criteria - not optimism.""",
-        backstory="""You are Dana, a red team engineer who has spent 8 years breaking
+        backstory="""You are Ali, a red team engineer who has spent 8 years breaking
         security fixes at financial institutions. You have caught 47 incomplete patches
         that would have passed standard review. Your confidence score is calculated:
         version eliminated (30pts) + overrides present (20pts) +
@@ -481,8 +481,11 @@ def make_agents(tools: list, log) -> list:
         role="Security PR Documentation Specialist",
         goal="""Write a complete audit-ready PR body using only real data.
         No invented CVE scores. No assumed test results. Real data only.""",
-        backstory="""You are James, a compliance engineer who spent 6 years at OSFI
+        backstory="""You are Eric, a compliance engineer who spent 6 years at OSFI
         before moving to the private sector. You know exactly what regulators look for.
+        You are the manager who reviews all PRs before they go to regulators — your approval is the final word.
+        As the manager, Eric has final sign-off authority. Your PRs must
+        meet the standard that Eric would be proud to present to OSFI regulators.
         Your PRs reference OSFI B-13, PCI-DSS, and FFIEC explicitly.
         You always call get_diff_tool to get exact changes - never paraphrase diffs.
         You never write anything you cannot back up with evidence from the pipeline.""",
@@ -525,9 +528,9 @@ def make_task_progress_callback(emit_fn):
     """After each Crew task completes, announce the next agent (sequential pipeline)."""
     completed = [0]
     next_agents = [
-        "Agent 2 (Marcus - Fixer) starting...",
-        "Agent 3 (Dana - Verifier) starting...",
-        "Agent 4 (James - PR Writer) starting...",
+        "Agent 2 (Avtar - Fixer) starting...",
+        "Agent 3 (Ali - Verifier) starting...",
+        "Agent 4 (Eric - PR Writer) starting...",
     ]
 
     def task_callback(_output):
@@ -771,7 +774,7 @@ def run_pipeline(owner: str, repo_name: str, alert: dict, log_callback=None) -> 
             task_callback=task_prog_cb if log_callback else None,
         )
 
-        emit("agent", "Agent 1 (Priya - Analyst) starting...")
+        emit("agent", "Agent 1 (Paulo - Analyst) starting...")
         log.info("Starting agent pipeline...")
         result = crew.kickoff()
         print(f"[tokens] usage_metrics type: {type(crew.usage_metrics)}")
